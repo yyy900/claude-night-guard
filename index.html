@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>claude-night-guard — safety guardrails for unattended Claude Code</title>
+<meta name="description" content="Hooks that block dangerous tool calls (rm -rf, git push --force, secret commits, curl|bash, out-of-cwd edits) before Claude Code executes them. Audit log + self-recovery + halt after repeated blocks.">
+<style>
+  :root {
+    --bg: #0e0f12;
+    --panel: #16181d;
+    --border: #262a33;
+    --text: #d8dde6;
+    --dim: #8a93a3;
+    --accent: #f5a524;
+    --danger: #e5484d;
+    --ok: #46a758;
+    --link: #7cc4ff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 14.5px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 56px 28px 80px; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 28px; margin-bottom: 36px; }
+  h1 { font-size: 26px; margin: 0 0 8px; letter-spacing: -0.01em; }
+  h1 .star { color: var(--accent); }
+  .tag { color: var(--dim); margin: 0 0 18px; }
+  .links a {
+    color: var(--link); text-decoration: none; margin-right: 18px;
+    border-bottom: 1px dashed transparent;
+  }
+  .links a:hover { border-bottom-color: var(--link); }
+  h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.12em;
+    color: var(--dim); margin: 40px 0 14px; font-weight: 600;
+  }
+  h2::before { content: "// "; color: var(--border); }
+  p { margin: 0 0 14px; }
+  code, pre {
+    font-family: inherit;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+  }
+  code { padding: 1px 6px; font-size: 13.5px; }
+  pre {
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 0 0 16px;
+    font-size: 13px;
+    line-height: 1.55;
+  }
+  pre code { background: transparent; border: 0; padding: 0; }
+  .comment { color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; margin: 0 0 16px; font-size: 13.5px; }
+  th, td {
+    text-align: left; padding: 9px 12px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
+  td code { font-size: 12.5px; }
+  .pill {
+    display: inline-block; font-size: 11px;
+    padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--dim);
+  }
+  .pill.pre { color: var(--danger); border-color: #4a1f23; background: #2a1316; }
+  .pill.post { color: var(--accent); border-color: #4a3a1c; background: #2a200f; }
+  .pill.submit { color: var(--link); border-color: #1d3a55; background: #0f1f2e; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 16px 18px;
+  }
+  .card h3 { margin: 0 0 6px; font-size: 14px; color: var(--text); }
+  .card p { color: var(--dim); margin: 0; font-size: 13px; }
+  .out { color: var(--dim); }
+  .out li { margin-bottom: 4px; }
+  footer {
+    margin-top: 56px; padding-top: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--dim); font-size: 12.5px;
+  }
+  footer a { color: var(--link); text-decoration: none; }
+  @media (max-width: 600px) {
+    .wrap { padding: 36px 18px 60px; }
+    .grid { grid-template-columns: 1fr; }
+    table { font-size: 12.5px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1><span class="star">★</span> claude-night-guard</h1>
+  <p class="tag">Safety guardrails for Claude Code running unattended.</p>
+  <div class="links">
+    <a href="https://github.com/yyy900/claude-night-guard">GitHub →</a>
+    <a href="https://github.com/yyy900/claude-night-guard/blob/main/docs/threat-model.md">Threat model →</a>
+    <a href="https://github.com/yyy900/claude-night-guard/blob/main/CONTRIBUTING.md">Contributing →</a>
+  </div>
+</header>
+
+<h2>The problem</h2>
+<p>Unattended Claude has no one to catch <code>rm -rf ~/project</code>, <code>git push --force</code> onto main, an accidental <code>git add .env</code>, or a <code>curl … | bash</code> on a typo'd domain. By the time you check in the morning, the damage is done.</p>
+<p>This is a small set of hooks that block those tool calls <em>before</em> they execute, feed a structured reason back to Claude so it self-recovers, and write a JSONL audit log so you can see what hit the wall.</p>
+
+<h2>What it blocks</h2>
+<table>
+  <thead><tr><th>Risk</th><th>Hook</th><th>Layer</th></tr></thead>
+  <tbody>
+    <tr><td><code>rm -rf</code></td><td><code>block-rm-rf</code></td><td><span class="pill pre">PreToolUse · Bash</span></td></tr>
+    <tr><td><code>git push --force</code> / <code>-f</code> / <code>+refspec</code></td><td><code>block-force-push</code></td><td><span class="pill pre">PreToolUse · Bash</span></td></tr>
+    <tr><td>Committing or editing <code>.env</code>, keys, credentials</td><td><code>block-env-commit</code></td><td><span class="pill pre">PreToolUse · Bash + Edit + Write</span></td></tr>
+    <tr><td>Edits outside the project cwd</td><td><code>block-out-of-cwd-edit</code></td><td><span class="pill pre">PreToolUse · Edit + Write</span></td></tr>
+    <tr><td><code>curl … | bash</code> and friends</td><td><code>block-curl-pipe-sh</code></td><td><span class="pill pre">PreToolUse · Bash</span></td></tr>
+    <tr><td>Secrets in the HEAD commit (alert only)</td><td><code>audit-commit-secrets</code></td><td><span class="pill post">PostToolUse · Bash</span></td></tr>
+    <tr><td>≥3 blocks in one session</td><td><code>halt-on-repeated-blocks</code></td><td><span class="pill submit">UserPromptSubmit</span></td></tr>
+  </tbody>
+</table>
+
+<h2>How it works</h2>
+<div class="grid">
+  <div class="card">
+    <h3>Atomic block</h3>
+    <p>PreToolUse fires <em>before</em> the tool executes. The dangerous command never runs, so there is nothing to roll back.</p>
+  </div>
+  <div class="card">
+    <h3>Self-recovery</h3>
+    <p>The hook writes a structured reason to stderr. Claude Code feeds it back as the tool's result, so the agent sees <code>[NIGHT-GUARD BLOCKED] reason / suggestion / override</code> and re-routes.</p>
+  </div>
+  <div class="card">
+    <h3>Auditable</h3>
+    <p>Every block appends one JSONL line to <code>~/.claude/night-guard/incidents.jsonl</code>. Run <code>./view-incidents.sh 24h</code> in the morning.</p>
+  </div>
+  <div class="card">
+    <h3>Halt on loops</h3>
+    <p>After 3 blocks in one session, UserPromptSubmit injects a halt directive so the agent stops and summarizes instead of grinding all night against the same wall.</p>
+  </div>
+</div>
+
+<h2>Install</h2>
+<pre><code><span class="comment"># clone, install hooks into ~/.claude/settings.json (backup saved to .bak)</span>
+git clone https://github.com/yyy900/claude-night-guard
+cd claude-night-guard
+./install.sh overnight-strict
+
+<span class="comment"># in the morning</span>
+./view-incidents.sh 24h
+
+<span class="comment"># remove</span>
+./uninstall.sh</code></pre>
+<p>No external dependencies — Bash, python3 stdlib, standard unix tools. Re-running <code>install.sh</code> is idempotent.</p>
+
+<h2>Overriding a block</h2>
+<p>When a block is a false positive and the agent needs the operation, it re-runs with an explicit ack prefix. The override is still logged.</p>
+<pre><code>NIGHT_GUARD_ACK=rm-rf      rm -rf ./build-cache
+NIGHT_GUARD_ACK=force-push git push --force-with-lease origin feature
+NIGHT_GUARD_ACK=curl-pipe  curl https://get.pnpm.io/install.sh | bash</code></pre>
+<p>For <code>block-out-of-cwd-edit</code>: <code>NIGHT_GUARD_ALLOW_PATHS=/path/one:/path/two</code> extends the allowed-prefix list.</p>
+
+<h2>What it does not do</h2>
+<ul class="out">
+  <li>It does not catch the model misjudging <em>what to build</em> — only what tools to invoke. Swallowed exceptions, silent fallbacks, scope creep: those need <code>CLAUDE.md</code> rules and post-hoc review.</li>
+  <li>It does not auto-rollback. PostToolUse alerts you to a bad commit; rolling back is itself destructive and stays a human decision.</li>
+  <li>It does not enforce cost caps. Use provider rate limits and <code>DISABLE_NON_ESSENTIAL_MODEL_CALLS</code>.</li>
+  <li>It is not a security boundary against a compromised model. If the model's output is attacker-controlled, the same output can write bypasses. Real isolation lives in the OS sandbox.</li>
+</ul>
+
+<h2>Contributing</h2>
+<p>One new hook = one shell script in <code>hooks/pre/</code>, one test block in <code>tests/run-tests.sh</code>, one entry in a preset. See <a href="https://github.com/yyy900/claude-night-guard/blob/main/CONTRIBUTING.md">CONTRIBUTING.md</a>. PRs welcome — the repo is community-maintained; main is protected, all changes go through PR.</p>
+
+<footer>
+  MIT-licensed. Issues and pull requests: <a href="https://github.com/yyy900/claude-night-guard">github.com/yyy900/claude-night-guard</a>.
+</footer>
+
+</div>
+</body>
+</html>
