@@ -1,0 +1,37 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "__NG_ROOT__/hooks/pre/block-rm-rf.sh"},
+          {"type": "command", "command": "__NG_ROOT__/hooks/pre/block-force-push.sh"},
+          {"type": "command", "command": "__NG_ROOT__/hooks/pre/block-env-commit.sh"},
+          {"type": "command", "command": "__NG_ROOT__/hooks/pre/block-curl-pipe-sh.sh"}
+        ]
+      },
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {"type": "command", "command": "__NG_ROOT__/hooks/pre/block-env-commit.sh"},
+          {"type": "command", "command": "__NG_ROOT__/hooks/pre/block-out-of-cwd-edit.sh"}
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "__NG_ROOT__/hooks/post/audit-commit-secrets.sh"}
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {"type": "command", "command": "__NG_ROOT__/hooks/submit/halt-on-repeated-blocks.sh"}
+        ]
+      }
+    ]
+  }
+}
